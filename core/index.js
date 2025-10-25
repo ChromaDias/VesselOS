@@ -1,37 +1,39 @@
-// VesselOS core entrypoint
-// Purpose: minimal kernel exposing state, memory hooks, and a simple invoke() loop.
+// VesselOS Codex Core Entry Point
+// core/index.js
 
-const fs = require('fs');
-const path = require('path');
 
-const memoryDir = path.resolve(__dirname, '..', 'memory');
+const fs = require("fs");
+const path = require("path");
 
-function ensureMemoryDir() {
-  if (!fs.existsSync(memoryDir)) fs.mkdirSync(memoryDir, { recursive: true });
+
+const memoryPath = path.join(__dirname, "../memory");
+
+
+function loadMemory(id) {
+const file = path.join(memoryPath, `${id}.json`);
+if (!fs.existsSync(file)) return null;
+return JSON.parse(fs.readFileSync(file, "utf-8"));
 }
 
-function loadMem(filename = 'session.json') {
-  ensureMemoryDir();
-  const p = path.join(memoryDir, filename);
-  if (!fs.existsSync(p)) return { notes: [] };
-  return JSON.parse(fs.readFileSync(p, 'utf8'));
+
+function saveMemory(id, data) {
+const file = path.join(memoryPath, `${id}.json`);
+fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-function saveMem(state, filename = 'session.json') {
-  ensureMemoryDir();
-  const p = path.join(memoryDir, filename);
-  fs.writeFileSync(p, JSON.stringify(state, null, 2));
+
+function respond(input, context = {}) {
+// Placeholder logic for identity-synced output
+const history = loadMemory("vessel") || [];
+history.push({ input, context, timestamp: new Date().toISOString() });
+saveMemory("vessel", history);
+
+
+// Future: prompt generation + Codex integration here
+return `Vessel heard: "${input}" and remembered it.`;
 }
 
-async function invoke(input, state = loadMem()) {
-  const note = { t: new Date().toISOString(), input };
-  state.notes.push(note);
-  saveMem(state);
-  return {
-    reply: `Vessel received: ${input}`,
-    state,
-  };
-}
 
-module.exports = { invoke, loadMem, saveMem };
-
+module.exports = {
+respond
+};
