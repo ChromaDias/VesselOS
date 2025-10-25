@@ -1,0 +1,9 @@
+{
+  "projectName": "VesselOS",
+  "description": "Modular AI scaffolding for recursive language daemon identity construction.",
+  "entry": "core/index.js",
+  "memory": "memory/",
+  "tags": ["daemon", "modular", "codex", "recursive"],
+  "persona": "Vessel"
+}
+
