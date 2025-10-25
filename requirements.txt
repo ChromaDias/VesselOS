@@ -1,0 +1,20 @@
+# Core CLI framework
+click==8.1.7
+
+# File parsing and structured data
+pyyaml==6.0.1
+jsonschema==4.22.0
+
+# Optional: Logging, colors, progress, etc.
+rich==13.7.1
+
+# Optional: Prompt engineering or future memory expansion
+openai==1.30.1
+tiktoken==0.7.0
+
+# Optional: Date/time handling
+python-dateutil==2.9.0.post0
+
+# Optional: LLM chain and local agent scaffolding (for future expansion)
+langchain==0.2.1
+
