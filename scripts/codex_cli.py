@@ -628,6 +628,80 @@ if click:
         if rc != 0:
             raise click.ClickException("Export failed")
 
+    @codex.command("list", help="List entries from the vault with optional filters")
+    @click.option("--tag", "tag", required=False)
+    @click.option("--date", "date_str", required=False, help="YYYY-MM-DD prefix to match created/anchor date")
+    @click.option("--type", "typ", required=False, type=click.Choice(["dream", "log", "fragment", "event", "entry"], case_sensitive=False))
+    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
+    def list_cmd(tag: str | None, date_str: str | None, typ: str | None, vault: Path):
+        try:
+            from codex.core.indexer import list_entries  # type: ignore
+        except Exception as e:
+            raise click.ClickException(f"Indexer unavailable: {e}")
+        rows = list_entries(Path(vault), tag=tag, date=date_str, typ=typ)
+        if not rows:
+            click.echo("(no entries)")
+            return
+        for fname, it in rows:
+            dt = (it.get("anchor_date") or it.get("created_at") or "").split("T")[0]
+            title = it.get("title") or fname
+            tags = ", ".join(it.get("tags") or [])
+            click.echo(f"- {dt:10s} [{it.get('type')}] {title}  (tags: {tags})  -> {fname}")
+
+    @codex.command("index", help="Rebuild the vault index")
+    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
+    def index_cmd(vault: Path):
+        try:
+            from codex.core.indexer import build_index  # type: ignore
+        except Exception as e:
+            raise click.ClickException(f"Indexer unavailable: {e}")
+        p = build_index(Path(vault))
+        click.echo(f"[OK] Rebuilt index at {p}")
+
+    @codex.command("add", help="Create a new entry in the vault")
+    @click.option("--title", required=True)
+    @click.option("--body", required=True)
+    @click.option("--tags", "tags_csv", required=False, help="Comma-separated tags")
+    @click.option("--date", "date_str", required=False, help="Anchor/created date (YYYY-MM-DD)")
+    @click.option("--dream", is_flag=True, default=False, help="Store under dreams/ and mark origin=dream")
+    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
+    def add_cmd(title: str, body: str, tags_csv: str | None, date_str: str | None, dream: bool, vault: Path):
+        try:
+            from codex.core.schema import validate_entry  # type: ignore
+        except Exception:
+            def validate_entry(_) -> bool:  # type: ignore
+                return True
+        tags = [t.strip() for t in (tags_csv or "").split(",") if t.strip()]
+        entry = {
+            "title": title,
+            "tags": tags,
+            "created_at": date_str or "",
+            "anchor_date": date_str or "",
+            "body": body,
+            "metadata": {"origin": "dream"} if dream else {},
+        }
+        if not validate_entry(entry):
+            raise click.ClickException("Entry does not conform to schema (title/body required)")
+        vault_path = Path(vault)
+        target_dir = vault_path / ("dreams" if dream else "entries")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        import re
+        date_part = (date_str or "undated").replace(":", "-")
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", title).strip("_") or "entry"
+        fname = f"codex_{date_part}_{slug}.json"
+        out_path = target_dir / fname
+        i = 1
+        while out_path.exists():
+            out_path = target_dir / f"codex_{date_part}_{slug}_{i}.json"
+            i += 1
+        out_path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
+        try:
+            from codex.core.indexer import build_index  # type: ignore
+            build_index(vault_path)
+        except Exception:
+            pass
+        click.echo(f"[OK] Created {out_path}")
+
     @codex.command("update", help="Modify or expand an entry by pattern replacement")
     @click.argument("target")
     @click.option("--pattern", "pattern", required=True, help="Regex pattern to search for")
@@ -762,6 +836,23 @@ else:  # Fallback minimal CLI
         p_export.add_argument("--with-metadata", dest="with_metadata", action="store_true")
         p_export.add_argument("--output")
         p_export.add_argument("--vault", default=str(Path.cwd()))
+
+        p_list = sub.add_parser("list", help="List entries with optional filters")
+        p_list.add_argument("--tag")
+        p_list.add_argument("--date", dest="date_str")
+        p_list.add_argument("--type", dest="typ", choices=["dream", "log", "fragment", "event", "entry"])
+        p_list.add_argument("--vault", default=str(Path.cwd()))
+
+        p_index = sub.add_parser("index", help="Rebuild the vault index")
+        p_index.add_argument("--vault", default=str(Path.cwd()))
+
+        p_add = sub.add_parser("add", help="Create a new entry")
+        p_add.add_argument("--title", required=True)
+        p_add.add_argument("--body", required=True)
+        p_add.add_argument("--tags", dest="tags_csv")
+        p_add.add_argument("--date", dest="date_str")
+        p_add.add_argument("--dream", action="store_true")
+        p_add.add_argument("--vault", default=str(Path.cwd()))
 
         args = parser.parse_args(argv)
         if args.cmd == "init":
@@ -1226,6 +1317,68 @@ else:  # Fallback minimal CLI
 
             lines.append("Use \"codex open <entry_id>\" to review.")
             print("\n".join(lines))
+            return 0
+        elif args.cmd == "list":
+            try:
+                from codex.core.indexer import list_entries  # type: ignore
+            except Exception:
+                print("[ERR] Indexer unavailable", file=sys.stderr)
+                return 2
+            rows = list_entries(Path(args.vault), tag=args.tag, date=args.date_str, typ=args.typ)
+            if not rows:
+                print("(no entries)")
+                return 0
+            for fname, it in rows:
+                dt = (it.get("anchor_date") or it.get("created_at") or "").split("T")[0]
+                title = it.get("title") or fname
+                tags = ", ".join(it.get("tags") or [])
+                print(f"- {dt:10s} [{it.get('type')}] {title}  (tags: {tags})  -> {fname}")
+            return 0
+        elif args.cmd == "index":
+            try:
+                from codex.core.indexer import build_index  # type: ignore
+            except Exception:
+                print("[ERR] Indexer unavailable", file=sys.stderr)
+                return 2
+            p = build_index(Path(args.vault))
+            print(f"[OK] Rebuilt index at {p}")
+            return 0
+        elif args.cmd == "add":
+            try:
+                from codex.core.schema import validate_entry  # type: ignore
+            except Exception:
+                def validate_entry(_):
+                    return True
+            tags = [t.strip() for t in (args.tags_csv or "").split(",") if t.strip()]
+            entry = {
+                "title": args.title,
+                "tags": tags,
+                "created_at": args.date_str or "",
+                "anchor_date": args.date_str or "",
+                "body": args.body,
+                "metadata": {"origin": "dream"} if args.dream else {},
+            }
+            if not validate_entry(entry):
+                print("[ERR] Entry failed schema validation", file=sys.stderr)
+                return 1
+            vault_path = Path(args.vault)
+            target_dir = vault_path / ("dreams" if args.dream else "entries")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            import re
+            date_part = (args.date_str or "undated").replace(":", "-")
+            slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", args.title).strip("_") or "entry"
+            out_path = target_dir / f"codex_{date_part}_{slug}.json"
+            i = 1
+            while out_path.exists():
+                out_path = target_dir / f"codex_{date_part}_{slug}_{i}.json"
+                i += 1
+            out_path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
+            try:
+                from codex.core.indexer import build_index  # type: ignore
+                build_index(vault_path)
+            except Exception:
+                pass
+            print(f"[OK] Created {out_path}")
             return 0
         elif args.cmd == "update":
             import re
