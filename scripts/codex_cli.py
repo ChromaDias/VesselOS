@@ -362,11 +362,15 @@ if click:
     @click.option("--tag", "tag", required=False, help="Symbolic tag to search for")
     @click.option("--tone", "tone", required=False, help="Emotional tone to search (metadata.mood)")
     @click.option("--type", "typ", required=False, type=click.Choice(["dream", "log", "fragment", "event", "entry"], case_sensitive=False))
+    @click.option("--from", "from_", required=False, type=click.Choice(["dream"], case_sensitive=False), help="Activate dream memory matching mode")
+    @click.option("--symbol", "symbol", required=False, help="Search by visual dream motif or sigil")
+    @click.option("--feeling", "feeling", required=False, help="Synonym for --tone")
+    @click.option("--echo-depth", "echo_depth", default=1, show_default=True, help="Recursive depth for linked dream fragments (1-3)")
     @click.option("--fuzzy", is_flag=True, default=False, help="Enable approximate matching")
-    @click.option("--limit", "limit", default=3, show_default=True, help="Max results to return")
+    @click.option("--limit", "limit", default=3, show_default=True, help="Max results to return (max 10)")
     @click.option("--sort", "sort_by", default="resonance", show_default=True, type=click.Choice(["resonance", "date"], case_sensitive=False))
     @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True, help="Path to a vault")
-    def echo_cmd(phrase: str | None, tag: str | None, tone: str | None, typ: str | None, fuzzy: bool, limit: int, sort_by: str, vault: Path):
+    def echo_cmd(phrase: str | None, tag: str | None, tone: str | None, typ: str | None, from_: str | None, symbol: str | None, feeling: str | None, echo_depth: int, fuzzy: bool, limit: int, sort_by: str, vault: Path):
         from difflib import SequenceMatcher
         vault_path = Path(vault)
         entries = vault_path / "entries"
@@ -374,6 +378,15 @@ if click:
         cfg = vault_path / "config.json"
         if not (cfg.exists() and entries.exists()):
             raise click.ClickException("Vault not found: expected config.json and entries/ in --vault path")
+        # Normalize parameters
+        if feeling and not tone:
+            tone = feeling
+        dream_mode = (from_ or "").lower() == "dream"
+        try:
+            echo_depth = max(1, min(3, int(echo_depth)))
+        except Exception:
+            echo_depth = 1
+        limit = max(1, min(10, int(limit)))
 
         def _is_dream(d: dict) -> bool:
             tags = [str(t).lower() for t in (d.get("tags") or [])]
@@ -444,6 +457,9 @@ if click:
                 data = json.loads(p.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            # Dream-mode restricts to dream entries
+            if dream_mode and get_type(data) != "dream":
+                continue
             # Type hard filter if provided
             if typ and get_type(data) != typ.lower():
                 continue
@@ -461,14 +477,37 @@ if click:
                 text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
                 if not (tone.lower() in m or (fuzzy and tone.lower() in text)):
                     continue
+            if symbol:
+                s = symbol.lower()
+                tags_l = [str(ti).lower() for ti in (data.get("tags") or [])]
+                meta = data.get("metadata") or {}
+                symbols_l = [str(x).lower() for x in (meta.get("symbols") or [])]
+                text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
+                if not (any(s in t for t in tags_l) or any(s in x for x in symbols_l) or s in text or (fuzzy and s in text)):
+                    continue
             pairs.append((p, data))
 
         if not pairs:
             click.echo("No echoes found.")
             return
 
+        # Boost resonance with symbol matching
+        def symbol_boost(d: dict) -> float:
+            if not symbol:
+                return 0.0
+            s = str(symbol).lower()
+            tags_l = [str(ti).lower() for ti in (d.get("tags") or [])]
+            meta = d.get("metadata") or {}
+            symbols_l = [str(x).lower() for x in (meta.get("symbols") or [])]
+            text = (str(d.get("title", "")) + "\n" + str(d.get("body", ""))).lower()
+            if any(s in t for t in tags_l) or any(s in x for x in symbols_l):
+                return 0.25
+            if fuzzy and s in text:
+                return 0.15
+            return 0.0
+
         scored = [
-            (reson_score(d), p, d) for p, d in pairs
+            (reson_score(d) + symbol_boost(d), p, d) for p, d in pairs
         ]
 
         if sort_by.lower() == "date":
@@ -481,12 +520,48 @@ if click:
 
         top = scored[: max(1, int(limit))]
 
+        # Dream-mode: optionally include shallow references (echo depth)
+        ref_map = {}
+        if dream_mode and echo_depth > 1:
+            # Build candidate set for references
+            all_dream_pairs = [(p, d) for p, d in pairs if get_type(d) == "dream"]
+            def _linked(ref: dict):
+                from datetime import datetime, timedelta
+                def _parse(dt: str):
+                    try:
+                        return datetime.fromisoformat(dt.replace("Z", "+00:00"))
+                    except Exception:
+                        return None
+                ts = _parse(str(ref.get("anchor_date") or ref.get("created_at") or ""))
+                tags_ref = set(str(t).lower() for t in (ref.get("tags") or []))
+                sym_ref = set(str(x).lower() for x in ((ref.get("metadata") or {}).get("symbols") or []))
+                links = []
+                for p, d in all_dream_pairs:
+                    if d is ref:
+                        continue
+                    # date window
+                    ok_date = False
+                    if ts:
+                        dt = _parse(str(d.get("anchor_date") or d.get("created_at") or ""))
+                        if dt:
+                            ok_date = abs((dt - ts).days) <= 3
+                    # tag/symbol overlap
+                    tags_d = set(str(t).lower() for t in (d.get("tags") or []))
+                    sym_d = set(str(x).lower() for x in ((d.get("metadata") or {}).get("symbols") or []))
+                    ok_overlap = bool(tags_ref & tags_d or sym_ref & sym_d)
+                    if ok_date or ok_overlap:
+                        links.append(p.name)
+                return links[:10]
+            for score, pth, dat in top:
+                ref_map[pth.name] = _linked(dat)
+
         # Render textual summary
         def excerpt(text: str, length: int = 120) -> str:
             t = " ".join(text.split())
             return (t[: length - 1] + "…") if len(t) > length else t
 
-        lines = ["# Codex Echo Results (" + ("Resonance" if sort_by.lower()=="resonance" else "Date") + " Sort)"]
+        heading = "Codex Echo (Dream Mode)" if dream_mode else "# Codex Echo Results (" + ("Resonance" if sort_by.lower()=="resonance" else "Date") + " Sort)"
+        lines = [heading if dream_mode else heading]
         if phrase:
             lines.append(f"Matched: \"{phrase}\" | Fuzzy: {'Enabled' if fuzzy else 'Disabled'}" + (f" | Tone: {tone}" if tone else ""))
         elif tag or tone or typ:
@@ -494,6 +569,8 @@ if click:
             if tag: meta.append(f"Tag: {tag}")
             if tone: meta.append(f"Tone: {tone}")
             if typ: meta.append(f"Type: {typ}")
+            if symbol: meta.append(f"Symbol: {symbol}")
+            if dream_mode: meta.append("From: dream")
             lines.append("Filters: " + ", ".join(meta))
         lines.append("")
 
@@ -517,11 +594,92 @@ if click:
                 lines.append(f"   - Resonance: {res_pct}%")
             if body:
                 lines.append(f"   - Excerpt: \"{excerpt(body)}\"")
+            if dream_mode and echo_depth > 1:
+                refs = ref_map.get(path_i.name) or []
+                if refs:
+                    lines.append(f"   - Echo Depth: 1 → references [{', '.join(refs)}]")
             lines.append("")
             idx += 1
 
         lines.append("Use \"codex open <entry_id>\" to review.")
         click.echo("\n".join(lines))
+
+    @codex.command("update", help="Modify or expand an entry by pattern replacement")
+    @click.argument("target")
+    @click.option("--pattern", "pattern", required=True, help="Regex pattern to search for")
+    @click.option("--replacement", "replacement", required=True, help="Replacement text")
+    @click.option("--multiple", is_flag=True, default=False, help="Replace all matches instead of the first only")
+    @click.option(
+        "--vault",
+        "vault",
+        type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+        default=Path.cwd(),
+        show_default=True,
+        help="Path to an existing vault (directory with config.json and entries/)",
+    )
+    def update_cmd(target: str, pattern: str, replacement: str, multiple: bool, vault: Path):
+        import re
+        from datetime import datetime, timezone
+        vault_path = Path(vault)
+        cfg = vault_path / "config.json"
+        entries = vault_path / "entries"
+        dreams = vault_path / "dreams"
+        if not (cfg.exists() and entries.exists()):
+            raise click.ClickException("Vault not found: expected config.json and entries/ in --vault path")
+
+        files = list(entries.glob("*.json"))
+        if dreams.exists():
+            files += list(dreams.glob("*.json"))
+
+        def matches_key(p: Path, data: dict) -> bool:
+            if p.name == target or p.stem == target:
+                return True
+            title = str(data.get("title", ""))
+            if target == title:
+                return True
+            tags = [str(t) for t in (data.get("tags") or [])]
+            return target in tags
+
+        candidates: list[tuple[Path, dict]] = []
+        for p in files:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if matches_key(p, data):
+                candidates.append((p, data))
+
+        if not candidates:
+            raise click.ClickException(f"No entry found matching: {target}")
+        if len(candidates) > 1:
+            names = ", ".join(p.name for p, _ in candidates[:10])
+            raise click.ClickException(f"Multiple entries match '{target}'. Be more specific. Candidates: {names} ...")
+
+        p, data = candidates[0]
+        flags = re.MULTILINE | re.DOTALL
+        total = 0
+        # Replace in title then body (first match overall unless --multiple)
+        if isinstance(data.get("title"), str):
+            new_title, n = re.subn(pattern, replacement, data["title"], 0 if multiple else 1, flags=flags)
+            if n:
+                data["title"] = new_title
+                total += n
+        if isinstance(data.get("body"), str) and (multiple or total == 0):
+            new_body, n = re.subn(pattern, replacement, data["body"], 0 if multiple else 1, flags=flags)
+            if n:
+                data["body"] = new_body
+                total += n
+
+        if total == 0:
+            click.echo("No changes applied (pattern not found).")
+            return
+
+        meta = data.get("metadata") or {}
+        meta["last_updated"] = datetime.now(timezone.utc).isoformat()
+        data["metadata"] = meta
+
+        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        click.echo(f"[OK] Updated {p.name} (replacements: {total})")
 
     def main(argv=None):
         return codex.main(args=argv, prog_name="codex")
@@ -558,10 +716,21 @@ else:  # Fallback minimal CLI
         p_echo.add_argument("--tag")
         p_echo.add_argument("--tone")
         p_echo.add_argument("--type", dest="typ", choices=["dream", "log", "fragment", "event", "entry"])
+        p_echo.add_argument("--from", dest="from_", choices=["dream"])
+        p_echo.add_argument("--symbol")
+        p_echo.add_argument("--feeling")
+        p_echo.add_argument("--echo-depth", dest="echo_depth", type=int, default=1)
         p_echo.add_argument("--fuzzy", action="store_true")
         p_echo.add_argument("--limit", type=int, default=3)
         p_echo.add_argument("--sort", dest="sort_by", choices=["resonance", "date"], default="resonance")
         p_echo.add_argument("--vault", default=str(Path.cwd()))
+
+        p_update = sub.add_parser("update", help="Modify or expand an entry by pattern replacement")
+        p_update.add_argument("target")
+        p_update.add_argument("--pattern", required=True)
+        p_update.add_argument("--replacement", required=True)
+        p_update.add_argument("--multiple", action="store_true")
+        p_update.add_argument("--vault", default=str(Path.cwd()))
 
         args = parser.parse_args(argv)
         if args.cmd == "init":
@@ -820,6 +989,14 @@ else:  # Fallback minimal CLI
             if not (cfg.exists() and entries.exists()):
                 print("Vault not found: expected config.json and entries/ in --vault path", file=sys.stderr)
                 return 2
+            # Normalize
+            tone = args.tone or args.feeling
+            dream_mode = (args.from_ or '').lower() == 'dream'
+            try:
+                echo_depth = max(1, min(3, int(args.echo_depth)))
+            except Exception:
+                echo_depth = 1
+            limit = max(1, min(10, int(args.limit)))
 
             def _is_dream(d: dict) -> bool:
                 tags = [str(t).lower() for t in (d.get("tags") or [])]
@@ -887,6 +1064,8 @@ else:  # Fallback minimal CLI
                     data = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
                     continue
+                if dream_mode and get_type(data) != 'dream':
+                    continue
                 if args.typ and get_type(data) != args.typ.lower():
                     continue
                 if args.tag:
@@ -897,10 +1076,18 @@ else:  # Fallback minimal CLI
                     text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
                     if not (t in tags_l or any(t in s for s in symbols) or (args.fuzzy and t in text)):
                         continue
-                if args.tone:
+                if tone:
                     m = str((data.get("metadata") or {}).get("mood", "")).lower()
                     text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
-                    if not (args.tone.lower() in m or (args.fuzzy and args.tone.lower() in text)):
+                    if not ((tone or '').lower() in m or (args.fuzzy and (tone or '').lower() in text)):
+                        continue
+                if args.symbol:
+                    s = args.symbol.lower()
+                    tags_l = [str(ti).lower() for ti in (data.get("tags") or [])]
+                    meta = data.get("metadata") or {}
+                    symbols_l = [str(x).lower() for x in (meta.get("symbols") or [])]
+                    text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
+                    if not (any(s in t for t in tags_l) or any(s in x for x in symbols_l) or s in text or (args.fuzzy and s in text)):
                         continue
                 pairs.append((p, data))
 
@@ -908,25 +1095,74 @@ else:  # Fallback minimal CLI
                 print("No echoes found.")
                 return 0
 
-            scored = [ (reson_score(d), p, d) for p, d in pairs ]
+            def symbol_boost(d: dict) -> float:
+                if not args.symbol:
+                    return 0.0
+                s = args.symbol.lower()
+                tags_l = [str(ti).lower() for ti in (d.get("tags") or [])]
+                meta = d.get("metadata") or {}
+                symbols_l = [str(x).lower() for x in (meta.get("symbols") or [])]
+                text = (str(d.get("title", "")) + "\n" + str(d.get("body", ""))).lower()
+                if any(s in t for t in tags_l) or any(s in x for x in symbols_l):
+                    return 0.25
+                if args.fuzzy and s in text:
+                    return 0.15
+                return 0.0
+
+            scored = [ (reson_score(d) + symbol_boost(d), p, d) for p, d in pairs ]
             if args.sort_by.lower() == "date":
                 scored.sort(key=lambda x: get_date(x[2]), reverse=True)
             else:
                 scored.sort(key=lambda x: x[0], reverse=True)
-            top = scored[: max(1, int(args.limit))]
+            top = scored[: max(1, int(limit))]
+
+            # Dream-mode echo depth references
+            ref_map = {}
+            if dream_mode and echo_depth > 1:
+                all_dream_pairs = [(p, d) for p, d in pairs if get_type(d) == 'dream']
+                def _linked(ref: dict):
+                    from datetime import datetime, timedelta
+                    def _parse(dt: str):
+                        try:
+                            return datetime.fromisoformat(dt.replace('Z', '+00:00'))
+                        except Exception:
+                            return None
+                    ts = _parse(str(ref.get('anchor_date') or ref.get('created_at') or ''))
+                    tags_ref = set(str(t).lower() for t in (ref.get('tags') or []))
+                    sym_ref = set(str(x).lower() for x in ((ref.get('metadata') or {}).get('symbols') or []))
+                    links = []
+                    for p, d in all_dream_pairs:
+                        if d is ref:
+                            continue
+                        ok_date = False
+                        if ts:
+                            dt = _parse(str(d.get('anchor_date') or d.get('created_at') or ''))
+                            if dt:
+                                ok_date = abs((dt - ts).days) <= 3
+                        tags_d = set(str(t).lower() for t in (d.get('tags') or []))
+                        sym_d = set(str(x).lower() for x in ((d.get('metadata') or {}).get('symbols') or []))
+                        ok_overlap = bool(tags_ref & tags_d or sym_ref & sym_d)
+                        if ok_date or ok_overlap:
+                            links.append(p.name)
+                    return links[:10]
+                for score, pth, dat in top:
+                    ref_map[pth.name] = _linked(dat)
 
             def excerpt(text: str, length: int = 120) -> str:
                 t = " ".join(text.split())
                 return (t[: length - 1] + "…") if len(t) > length else t
 
-            lines = ["# Codex Echo Results (" + ("Resonance" if args.sort_by.lower()=="resonance" else "Date") + " Sort)"]
+            heading = "Codex Echo (Dream Mode)" if dream_mode else "# Codex Echo Results (" + ("Resonance" if args.sort_by.lower()=="resonance" else "Date") + " Sort)"
+            lines = [heading]
             if args.phrase:
                 lines.append(f"Matched: \"{args.phrase}\" | Fuzzy: {'Enabled' if args.fuzzy else 'Disabled'}" + (f" | Tone: {args.tone}" if args.tone else ""))
-            elif args.tag or args.tone or args.typ:
+            elif args.tag or args.tone or args.typ or args.symbol or dream_mode:
                 meta = []
                 if args.tag: meta.append(f"Tag: {args.tag}")
                 if args.tone: meta.append(f"Tone: {args.tone}")
                 if args.typ: meta.append(f"Type: {args.typ}")
+                if args.symbol: meta.append(f"Symbol: {args.symbol}")
+                if dream_mode: meta.append("From: dream")
                 lines.append("Filters: " + ", ".join(meta))
             lines.append("")
 
@@ -950,13 +1186,75 @@ else:  # Fallback minimal CLI
                     lines.append(f"   - Resonance: {res_pct}%")
                 if body:
                     lines.append(f"   - Excerpt: \"{excerpt(body)}\"")
+                if dream_mode and echo_depth > 1:
+                    refs = ref_map.get(path_i.name) or []
+                    if refs:
+                        lines.append(f"   - Echo Depth: 1 → references [{', '.join(refs)}]")
                 lines.append("")
                 idx += 1
 
             lines.append("Use \"codex open <entry_id>\" to review.")
             print("\n".join(lines))
             return 0
+        elif args.cmd == "update":
+            import re
+            from datetime import datetime, timezone
+            vault_path = Path(args.vault)
+            cfg = vault_path / "config.json"
+            entries = vault_path / "entries"
+            dreams = vault_path / "dreams"
+            if not (cfg.exists() and entries.exists()):
+                print("[ERR] Vault not found: expected config.json and entries/ in --vault path", file=sys.stderr)
+                return 2
+            files = list(entries.glob("*.json"))
+            if dreams.exists():
+                files += list(dreams.glob("*.json"))
+            def matches_key(p: Path, data: dict) -> bool:
+                if p.name == args.target or p.stem == args.target:
+                    return True
+                title = str(data.get("title", ""))
+                if args.target == title:
+                    return True
+                tags = [str(t) for t in (data.get("tags") or [])]
+                return args.target in tags
+            candidates = []
+            for p in files:
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if matches_key(p, data):
+                    candidates.append((p, data))
+            if not candidates:
+                print(f"[ERR] No entry found matching: {args.target}", file=sys.stderr)
+                return 1
+            if len(candidates) > 1:
+                names = ", ".join(p.name for p, _ in candidates[:10])
+                print(f"[ERR] Multiple entries match '{args.target}'. Candidates: {names} ...", file=sys.stderr)
+                return 2
+            p, data = candidates[0]
+            flags = re.MULTILINE | re.DOTALL
+            total = 0
+            if isinstance(data.get("title"), str):
+                new_title, n = re.subn(args.pattern, args.replacement, data["title"], 0 if args.multiple else 1, flags=flags)
+                if n:
+                    data["title"] = new_title
+                    total += n
+            if isinstance(data.get("body"), str) and (args.multiple or total == 0):
+                new_body, n = re.subn(args.pattern, args.replacement, data["body"], 0 if args.multiple else 1, flags=flags)
+                if n:
+                    data["body"] = new_body
+                    total += n
+            if total == 0:
+                print("No changes applied (pattern not found).")
+                return 0
+            meta = data.get("metadata") or {}
+            meta["last_updated"] = datetime.now(timezone.utc).isoformat()
+            data["metadata"] = meta
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            print(f"[OK] Updated {p.name} (replacements: {total})")
+            return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+    if __name__ == "__main__":
+        sys.exit(main())
