@@ -779,6 +779,78 @@ if click:
         p.write_text(json.dumps(data, indent=2), encoding="utf-8")
         click.echo(f"[OK] Updated {p.name} (replacements: {total})")
 
+    @codex.command("grep", help="Search entries for a phrase or regex pattern")
+    @click.option("--pattern", "pattern", required=False, help="Regex to search for")
+    @click.option("--phrase", "phrase", required=False, help="Plain text to search for (treated literally)")
+    @click.option("--ignore-case", is_flag=True, default=False, help="Case-insensitive search")
+    @click.option("--field", "field", default="any", type=click.Choice(["title", "body", "any"], case_sensitive=False))
+    @click.option("--limit", "limit", default=20, show_default=True)
+    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
+    def grep_cmd(pattern: str | None, phrase: str | None, ignore_case: bool, field: str, limit: int, vault: Path):
+        import re
+        try:
+            from codex.core.store import collect_pairs  # type: ignore
+        except Exception:
+            raise click.ClickException("Store unavailable")
+        if not pattern and not phrase:
+            raise click.ClickException("Provide --pattern or --phrase")
+        flags = re.IGNORECASE if ignore_case else 0
+        pat = pattern or re.escape(str(phrase))
+        rx = re.compile(pat, flags)
+        pairs = collect_pairs(Path(vault))
+        shown = 0
+        def excerpt(txt: str, m: re.Match, ctx: int = 40) -> str:
+            s, e = m.start(), m.end()
+            lo = max(0, s - ctx)
+            hi = min(len(txt), e + ctx)
+            seg = txt[lo:hi].replace("\n", " ")
+            return ("..." if lo > 0 else "") + seg + ("..." if hi < len(txt) else "")
+        for p, d in pairs:
+            title = str(d.get("title", ""))
+            body = str(d.get("body", ""))
+            fields = []
+            if field.lower() in ("any", "title"):
+                fields.append(("title", title))
+            if field.lower() in ("any", "body"):
+                fields.append(("body", body))
+            matched = False
+            for fname, text in fields:
+                m = rx.search(text)
+                if m:
+                    click.echo(f"- {p.name} [{fname}] :: {excerpt(text, m)}")
+                    matched = True
+                    shown += 1
+                    break
+            if shown >= max(1, int(limit)):
+                break
+        if shown == 0:
+            click.echo("(no matches)")
+
+    @codex.command("snapshot", help="Create a point-in-time copy of an entry")
+    @click.argument("target")
+    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
+    @click.option("--out-dir", "out_dir", required=False, help="Custom snapshot directory (defaults to vault/system/snapshots)")
+    def snapshot_cmd(target: str, vault: Path, out_dir: str | None):
+        from datetime import datetime
+        try:
+            from codex.core.store import collect_pairs, match_target  # type: ignore
+        except Exception:
+            raise click.ClickException("Store unavailable")
+        pairs = collect_pairs(Path(vault))
+        matches = [(p, d) for p, d in pairs if match_target(target, p, d)]
+        if not matches:
+            raise click.ClickException("No entry matched target")
+        if len(matches) > 1:
+            names = ", ".join(p.name for p, _ in matches[:10])
+            raise click.ClickException(f"Multiple entries match. Candidates: {names} ...")
+        p, d = matches[0]
+        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        base = Path(out_dir) if out_dir else (Path(vault) / "system" / "snapshots" / p.stem)
+        base.mkdir(parents=True, exist_ok=True)
+        out_path = base / f"{p.stem}__{stamp}.json"
+        out_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
+        click.echo(f"[OK] Snapshot written to {out_path}")
+
     def main(argv=None):
         return codex.main(args=argv, prog_name="codex")
 
@@ -853,6 +925,19 @@ else:  # Fallback minimal CLI
         p_add.add_argument("--date", dest="date_str")
         p_add.add_argument("--dream", action="store_true")
         p_add.add_argument("--vault", default=str(Path.cwd()))
+
+        p_grep = sub.add_parser("grep", help="Search entries for a phrase or regex pattern")
+        p_grep.add_argument("--pattern")
+        p_grep.add_argument("--phrase")
+        p_grep.add_argument("--ignore-case", dest="ignore_case", action="store_true")
+        p_grep.add_argument("--field", choices=["title", "body", "any"], default="any")
+        p_grep.add_argument("--limit", type=int, default=20)
+        p_grep.add_argument("--vault", default=str(Path.cwd()))
+
+        p_snapshot = sub.add_parser("snapshot", help="Create a point-in-time copy of an entry")
+        p_snapshot.add_argument("target")
+        p_snapshot.add_argument("--vault", default=str(Path.cwd()))
+        p_snapshot.add_argument("--out-dir")
 
         args = parser.parse_args(argv)
         if args.cmd == "init":
@@ -1379,6 +1464,74 @@ else:  # Fallback minimal CLI
             except Exception:
                 pass
             print(f"[OK] Created {out_path}")
+            return 0
+        elif args.cmd == "grep":
+            import re
+            try:
+                from codex.core.store import collect_pairs  # type: ignore
+            except Exception:
+                print("[ERR] Store unavailable", file=sys.stderr)
+                return 2
+            if not args.pattern and not args.phrase:
+                print("[ERR] Provide --pattern or --phrase", file=sys.stderr)
+                return 2
+            flags = re.IGNORECASE if args.ignore_case else 0
+            pat = args.pattern or re.escape(str(args.phrase))
+            try:
+                rx = re.compile(pat, flags)
+            except re.error as e:
+                print(f"[ERR] Invalid regex: {e}", file=sys.stderr)
+                return 2
+            pairs = collect_pairs(Path(args.vault))
+            shown = 0
+            def excerpt(txt: str, m: re.Match, ctx: int = 40) -> str:
+                s, e = m.start(), m.end()
+                lo = max(0, s - ctx)
+                hi = min(len(txt), e + ctx)
+                seg = txt[lo:hi].replace("\n", " ")
+                return ("..." if lo > 0 else "") + seg + ("..." if hi < len(txt) else "")
+            for p, d in pairs:
+                title = str(d.get("title", ""))
+                body = str(d.get("body", ""))
+                fields = []
+                if args.field in ("any", "title"):
+                    fields.append(("title", title))
+                if args.field in ("any", "body"):
+                    fields.append(("body", body))
+                for fname, text in fields:
+                    m = rx.search(text)
+                    if m:
+                        print(f"- {p.name} [{fname}] :: {excerpt(text, m)}")
+                        shown += 1
+                        break
+                if shown >= max(1, int(args.limit)):
+                    break
+            if shown == 0:
+                print("(no matches)")
+            return 0
+        elif args.cmd == "snapshot":
+            from datetime import datetime
+            try:
+                from codex.core.store import collect_pairs, match_target  # type: ignore
+            except Exception:
+                print("[ERR] Store unavailable", file=sys.stderr)
+                return 2
+            pairs = collect_pairs(Path(args.vault))
+            matches = [(p, d) for p, d in pairs if match_target(args.target, p, d)]
+            if not matches:
+                print("[ERR] No entry matched target", file=sys.stderr)
+                return 1
+            if len(matches) > 1:
+                names = ", ".join(p.name for p, _ in matches[:10])
+                print(f"[ERR] Multiple entries match. Candidates: {names} ...", file=sys.stderr)
+                return 2
+            p, d = matches[0]
+            stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            base = Path(args.out_dir) if args.out_dir else (Path(args.vault) / "system" / "snapshots" / p.stem)
+            base.mkdir(parents=True, exist_ok=True)
+            out_path = base / f"{p.stem}__{stamp}.json"
+            out_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
+            print(f"[OK] Snapshot written to {out_path}")
             return 0
         elif args.cmd == "update":
             import re
