@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+
+# Prefer project venv python if available
+if [[ -x "$ROOT_DIR/.venv/bin/python3" ]]; then
+  PY="$ROOT_DIR/.venv/bin/python3"
+else
+  PY="python3"
+fi
+
+exec "$PY" "$ROOT_DIR/scripts/codex_cli.py" "$@"
+
