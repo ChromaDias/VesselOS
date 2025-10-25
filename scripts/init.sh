@@ -34,6 +34,19 @@ if [ ! -d "$ROOT_DIR/.venv" ]; then
   fi
 else
   echo "[INFO] Virtual environment already exists."
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.venv/bin/activate" || {
+    echo "[WARN] Failed to activate venv; skipping pip install."; 
+  }
+  if [ -n "$VIRTUAL_ENV" ]; then
+    pip install --upgrade pip
+    if [ -f "$ROOT_DIR/requirements.txt" ]; then
+      echo "[INFO] Installing Python dependencies from requirements.txt..."
+      pip install -r "$ROOT_DIR/requirements.txt"
+    else
+      echo "[INFO] No requirements.txt found; skipping pip install."
+    fi
+  fi
 fi
 
 # Check for config.json
