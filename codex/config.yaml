@@ -1,0 +1,5 @@
+# Default configuration for Codex core
+output_dir: exports
+date_format: "%Y-%m-%d"
+include_metadata_default: false
+

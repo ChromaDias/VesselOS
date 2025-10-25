@@ -10,6 +10,15 @@ try:
 except Exception:  # pragma: no cover
     click = None
 
+# Add repo root to path for codex core imports
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+try:
+    from codex.core.export import run as export_run  # type: ignore
+except Exception:  # pragma: no cover
+    export_run = None
+
 
 def _init_vault(name: str, base: Path):
     base_path = Path(base)
@@ -604,6 +613,21 @@ if click:
         lines.append("Use \"codex open <entry_id>\" to review.")
         click.echo("\n".join(lines))
 
+    @codex.command("export", help="Export an entry or collection into a portable format")
+    @click.argument("target")
+    @click.option("--format", "fmt", default="md", show_default=True,
+                  type=click.Choice(["md", "txt", "json", "yaml", "pdf", "rtf", "html"], case_sensitive=False))
+    @click.option("--with-metadata", is_flag=True, default=False, help="Include metadata, timestamps, tags, authors")
+    @click.option("--output", "output", required=False, help="Output filename (written under exports/)")
+    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+                  default=Path.cwd(), show_default=True, help="Path to a vault")
+    def export_cmd(target: str, fmt: str, with_metadata: bool, output: str | None, vault: Path):
+        if export_run is None:
+            raise click.ClickException("Export module unavailable")
+        rc = export_run(target, fmt, with_metadata, output, Path(vault))
+        if rc != 0:
+            raise click.ClickException("Export failed")
+
     @codex.command("update", help="Modify or expand an entry by pattern replacement")
     @click.argument("target")
     @click.option("--pattern", "pattern", required=True, help="Regex pattern to search for")
@@ -731,6 +755,13 @@ else:  # Fallback minimal CLI
         p_update.add_argument("--replacement", required=True)
         p_update.add_argument("--multiple", action="store_true")
         p_update.add_argument("--vault", default=str(Path.cwd()))
+
+        p_export = sub.add_parser("export", help="Export an entry or collection into a portable format")
+        p_export.add_argument("target")
+        p_export.add_argument("--format", dest="fmt", default="md", choices=["md","txt","json","yaml","pdf","rtf","html"])
+        p_export.add_argument("--with-metadata", dest="with_metadata", action="store_true")
+        p_export.add_argument("--output")
+        p_export.add_argument("--vault", default=str(Path.cwd()))
 
         args = parser.parse_args(argv)
         if args.cmd == "init":
@@ -1253,6 +1284,142 @@ else:  # Fallback minimal CLI
             data["metadata"] = meta
             p.write_text(json.dumps(data, indent=2), encoding="utf-8")
             print(f"[OK] Updated {p.name} (replacements: {total})")
+            return 0
+        elif args.cmd == "export":
+            # Prefer modular export engine if available
+            try:
+                from codex.core.export import run as export_run  # type: ignore
+            except Exception:
+                export_run = None  # type: ignore
+            if export_run:
+                rc = export_run(args.target, args.fmt, bool(args.with_metadata), args.output, Path(args.vault))
+                return int(rc or 0)
+            vault_path = Path(args.vault)
+            entries = vault_path / "entries"
+            dreams = vault_path / "dreams"
+            exports = vault_path / "exports"
+            cfg = vault_path / "config.json"
+            if not (cfg.exists() and entries.exists()):
+                print("[ERR] Vault not found: expected config.json and entries/ in --vault path", file=sys.stderr)
+                return 2
+            def collect_pairs():
+                files = list(entries.glob("*.json"))
+                if dreams.exists():
+                    files.extend(dreams.glob("*.json"))
+                pairs = []
+                for p in files:
+                    try:
+                        data = json.loads(p.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    pairs.append((p, data))
+                return pairs
+            pairs = collect_pairs()
+            def matches(p: Path, d: dict) -> bool:
+                if args.target == "*":
+                    return True
+                if p.name == args.target or p.stem == args.target:
+                    return True
+                if str(d.get("title", "")) == args.target:
+                    return True
+                tags = [str(t) for t in (d.get("tags") or [])]
+                return args.target in tags
+            chosen = [(p, d) for p, d in pairs if matches(p, d)]
+            if not chosen:
+                print(f"[ERR] No entries matched: {args.target}", file=sys.stderr)
+                return 1
+            def redact(d: dict) -> dict:
+                if args.with_metadata:
+                    return d
+                return {k: v for k, v in {"title": d.get("title"), "body": d.get("body")}.items() if v is not None}
+            def render_single(d: dict, fmt_l: str) -> str:
+                if fmt_l == "json":
+                    return json.dumps(redact(d), indent=2)
+                if fmt_l == "yaml":
+                    try:
+                        import yaml  # type: ignore
+                        return yaml.safe_dump(redact(d), sort_keys=False)
+                    except Exception:
+                        return json.dumps(redact(d), indent=2)
+                if fmt_l == "md":
+                    title = d.get("title", "Untitled")
+                    body = d.get("body", "") or ""
+                    lines = [f"# {title}", "", body]
+                    if args.with_metadata:
+                        created = d.get("created_at", "")
+                        tags = d.get("tags", []) or []
+                        meta = d.get("metadata", {}) or {}
+                        if created or tags:
+                            lines.insert(2, f"- Created: {created}\n- Tags: {', '.join(tags)}\n")
+                        if meta:
+                            lines += ["", "## Metadata", "```json", json.dumps(meta, indent=2), "```"]
+                    return "\n".join(lines).rstrip() + "\n"
+                if fmt_l == "txt":
+                    title = d.get("title", "Untitled")
+                    body = d.get("body", "") or ""
+                    return f"Title: {title}\n\n{body}\n"
+                if fmt_l == "html":
+                    import html as _html
+                    title = _html.escape(str(d.get("title", "Untitled")))
+                    body = _html.escape(str(d.get("body", "") or "")).replace("\n", "<br/>")
+                    meta_block = ""
+                    if args.with_metadata:
+                        created = _html.escape(str(d.get("created_at", "")))
+                        tags = ", ".join(_html.escape(str(x)) for x in (d.get("tags", []) or []))
+                        meta = _html.escape(json.dumps(d.get("metadata", {}) or {}, indent=2))
+                        meta_block = f"<p><em>Created:</em> {created} | <em>Tags:</em> {tags}</p><pre>{meta}</pre>"
+                    return f"<html><head><meta charset='utf-8'><title>{title}</title></head><body><h1>{title}</h1>{meta_block}<p>{body}</p></body></html>\n"
+                # pdf/rtf fallback use markdown
+                title = d.get("title", "Untitled")
+                body = d.get("body", "") or ""
+                content = [f"# {title}", "", body]
+                if args.with_metadata:
+                    content += ["", "## Metadata", json.dumps(d.get("metadata", {}) or {}, indent=2)]
+                return "\n".join(content) + "\n"
+            fmt_l = (args.fmt or "md").lower()
+            exports.mkdir(parents=True, exist_ok=True)
+            ext_map = {"md": ".md", "txt": ".txt", "json": ".json", "yaml": ".yaml", "html": ".html", "pdf": ".pdf", "rtf": ".rtf"}
+            if len(chosen) == 1 and args.target != "*":
+                p, d = chosen[0]
+                if args.output:
+                    out_path = exports / args.output
+                else:
+                    datep = str(d.get("anchor_date") or d.get("created_at") or "").split("T")[0] or "undated"
+                    label = "DreamEntry" if (d.get("metadata") or {}).get("origin", "").lower() == "dream" else "Entry"
+                    fname = f"{label}__{''.join(c if c.isalnum() or c in ('-','_','.') else '_' for c in str(d.get('title') or p.stem))}__{''.join(c if c.isalnum() or c in ('-','_','.') else '_' for c in datep)}{ext_map.get(fmt_l, '.txt')}"
+                    out_path = exports / fname
+                rendered = render_single(d, fmt_l)
+                out_path.write_text(rendered, encoding="utf-8")
+                if fmt_l in ("pdf", "rtf"):
+                    print(f"[OK] Wrote {fmt_l.upper()} content (markdown fallback) to {out_path}. Use pandoc for conversion if needed.")
+                else:
+                    print(f"[OK] Exported to {out_path}")
+                return 0
+            bundle = [redact(d) if fmt_l in ("json", "yaml") else d for _, d in chosen]
+            if args.output:
+                out_path = exports / args.output
+            else:
+                base = "CodexExport__all" if args.target == "*" else f"CodexExport__{''.join(c if c.isalnum() or c in ('-','_','.') else '_' for c in args.target)}"
+                out_path = exports / f"{base}{ext_map.get(fmt_l, '.txt')}"
+            if fmt_l == "json":
+                out_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+            elif fmt_l == "yaml":
+                try:
+                    import yaml  # type: ignore
+                    out_path.write_text(yaml.safe_dump(bundle, sort_keys=False), encoding="utf-8")
+                except Exception:
+                    out_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+            elif fmt_l == "html":
+                parts = [render_single(d, "html") for d in bundle]
+                out_path.write_text("\n".join(parts), encoding="utf-8")
+            else:
+                sep = "\n---\n\n"
+                block_fmt = "md" if fmt_l in ("md", "pdf", "rtf") else ("txt" if fmt_l == "txt" else "md")
+                parts = [render_single(d, block_fmt) for d in bundle]
+                out_path.write_text(sep.join(parts), encoding="utf-8")
+                if fmt_l in ("pdf", "rtf"):
+                    print(f"[OK] Wrote {fmt_l.upper()} content (markdown fallback) to {out_path}. Use pandoc for conversion if needed.")
+            print(f"[OK] Exported {len(chosen)} entries to {out_path}")
             return 0
 
 
