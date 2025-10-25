@@ -357,6 +357,172 @@ if click:
         else:
             click.echo(rendered)
 
+    @codex.command("echo", help="Resonance-based retrieval of past entries")
+    @click.option("--phrase", "phrase", required=False, help="Quoted phrase to search in body/title")
+    @click.option("--tag", "tag", required=False, help="Symbolic tag to search for")
+    @click.option("--tone", "tone", required=False, help="Emotional tone to search (metadata.mood)")
+    @click.option("--type", "typ", required=False, type=click.Choice(["dream", "log", "fragment", "event", "entry"], case_sensitive=False))
+    @click.option("--fuzzy", is_flag=True, default=False, help="Enable approximate matching")
+    @click.option("--limit", "limit", default=3, show_default=True, help="Max results to return")
+    @click.option("--sort", "sort_by", default="resonance", show_default=True, type=click.Choice(["resonance", "date"], case_sensitive=False))
+    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True, help="Path to a vault")
+    def echo_cmd(phrase: str | None, tag: str | None, tone: str | None, typ: str | None, fuzzy: bool, limit: int, sort_by: str, vault: Path):
+        from difflib import SequenceMatcher
+        vault_path = Path(vault)
+        entries = vault_path / "entries"
+        dreams = vault_path / "dreams"
+        cfg = vault_path / "config.json"
+        if not (cfg.exists() and entries.exists()):
+            raise click.ClickException("Vault not found: expected config.json and entries/ in --vault path")
+
+        def _is_dream(d: dict) -> bool:
+            tags = [str(t).lower() for t in (d.get("tags") or [])]
+            if any(t in tags for t in ("dream", "dreams", "oneiric", "sleep", "vision")):
+                return True
+            meta = d.get("metadata") or {}
+            if str(meta.get("origin", "")).lower() == "dream":
+                return True
+            for k in ("category", "type", "state"):
+                v = str(meta.get(k, "")).lower()
+                if "dream" in v or "oneiric" in v:
+                    return True
+            return False
+
+        def get_type(d: dict) -> str:
+            if _is_dream(d):
+                return "dream"
+            meta = d.get("metadata") or {}
+            t = str(meta.get("type", "") or d.get("type", "")).lower()
+            return t or "entry"
+
+        def get_date(d: dict) -> str:
+            return str(d.get("anchor_date") or d.get("created_at") or "")
+
+        def reson_score(d: dict) -> float:
+            score = 0.0
+            text = (str(d.get("title", "")) + "\n" + str(d.get("body", ""))).lower()
+            tags = [str(t).lower() for t in (d.get("tags") or [])]
+            meta = d.get("metadata") or {}
+            mood = str(meta.get("mood", "")).lower()
+            symbols = [str(x).lower() for x in (meta.get("symbols") or [])]
+            if phrase:
+                p = phrase.lower()
+                if p in text:
+                    score += 0.6
+                elif fuzzy:
+                    # compare with title and body segments
+                    ratio_t = SequenceMatcher(None, p, str(d.get("title", "")).lower()).ratio()
+                    ratio_b = SequenceMatcher(None, p, text[:2000]).ratio()
+                    score += 0.4 * max(ratio_t, ratio_b)
+            if tag:
+                t = tag.lower()
+                if t in tags or any(t in s for s in symbols) or (fuzzy and t in text):
+                    score += 0.3
+                else:
+                    score -= 0.2
+            if tone:
+                t = tone.lower()
+                if t in mood or (fuzzy and t in text):
+                    score += 0.2
+                else:
+                    score -= 0.1
+            if typ:
+                score += 0.1 if get_type(d) == typ.lower() else -0.3
+            # small bonus for recency if sorting by resonance
+            dt = get_date(d)
+            if dt:
+                score += 0.01
+            return max(score, 0.0)
+
+        files = list(entries.glob("*.json"))
+        if dreams.exists():
+            files += list(dreams.glob("*.json"))
+
+        pairs: list[tuple[Path, dict]] = []
+        for p in files:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            # Type hard filter if provided
+            if typ and get_type(data) != typ.lower():
+                continue
+            # Tag/tone hard filters if provided and not fuzzy? choose soft filter -> require presence
+            if tag:
+                t = tag.lower()
+                tags_l = [str(ti).lower() for ti in (data.get("tags") or [])]
+                meta = data.get("metadata") or {}
+                symbols = [str(x).lower() for x in (meta.get("symbols") or [])]
+                text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
+                if not (t in tags_l or any(t in s for s in symbols) or (fuzzy and t in text)):
+                    continue
+            if tone:
+                m = str((data.get("metadata") or {}).get("mood", "")).lower()
+                text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
+                if not (tone.lower() in m or (fuzzy and tone.lower() in text)):
+                    continue
+            pairs.append((p, data))
+
+        if not pairs:
+            click.echo("No echoes found.")
+            return
+
+        scored = [
+            (reson_score(d), p, d) for p, d in pairs
+        ]
+
+        if sort_by.lower() == "date":
+            def dt_key(item):
+                _, pth, dat = item
+                return get_date(dat)
+            scored.sort(key=dt_key, reverse=True)
+        else:
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+        top = scored[: max(1, int(limit))]
+
+        # Render textual summary
+        def excerpt(text: str, length: int = 120) -> str:
+            t = " ".join(text.split())
+            return (t[: length - 1] + "…") if len(t) > length else t
+
+        lines = ["# Codex Echo Results (" + ("Resonance" if sort_by.lower()=="resonance" else "Date") + " Sort)"]
+        if phrase:
+            lines.append(f"Matched: \"{phrase}\" | Fuzzy: {'Enabled' if fuzzy else 'Disabled'}" + (f" | Tone: {tone}" if tone else ""))
+        elif tag or tone or typ:
+            meta = []
+            if tag: meta.append(f"Tag: {tag}")
+            if tone: meta.append(f"Tone: {tone}")
+            if typ: meta.append(f"Type: {typ}")
+            lines.append("Filters: " + ", ".join(meta))
+        lines.append("")
+
+        idx = 1
+        for score, path_i, data in top:
+            label_type = get_type(data).capitalize()
+            dt = get_date(data).split("T")[0]
+            title = str(data.get("title") or path_i.stem)
+            body = str(data.get("body") or "")
+            tags_l = data.get("tags") or []
+            mood = (data.get("metadata") or {}).get("mood")
+            res_pct = int(round(min(1.0, score) * 100))
+            lines.append(f"{idx}. {label_type}: {title}")
+            if dt:
+                lines.append(f"   - Logged: {dt}")
+            if tags_l:
+                lines.append(f"   - Tags: {', '.join(tags_l)}")
+            if mood:
+                lines.append(f"   - Tone: {mood}")
+            if sort_by.lower() == "resonance":
+                lines.append(f"   - Resonance: {res_pct}%")
+            if body:
+                lines.append(f"   - Excerpt: \"{excerpt(body)}\"")
+            lines.append("")
+            idx += 1
+
+        lines.append("Use \"codex open <entry_id>\" to review.")
+        click.echo("\n".join(lines))
+
     def main(argv=None):
         return codex.main(args=argv, prog_name="codex")
 
@@ -386,6 +552,16 @@ else:  # Fallback minimal CLI
         p_summon.add_argument("--format", dest="fmt", default="json")
         p_summon.add_argument("--export", dest="export", action="store_true")
         p_summon.add_argument("--vault", default=str(Path.cwd()))
+
+        p_echo = sub.add_parser("echo", help="Resonance-based retrieval of past entries")
+        p_echo.add_argument("--phrase")
+        p_echo.add_argument("--tag")
+        p_echo.add_argument("--tone")
+        p_echo.add_argument("--type", dest="typ", choices=["dream", "log", "fragment", "event", "entry"])
+        p_echo.add_argument("--fuzzy", action="store_true")
+        p_echo.add_argument("--limit", type=int, default=3)
+        p_echo.add_argument("--sort", dest="sort_by", choices=["resonance", "date"], default="resonance")
+        p_echo.add_argument("--vault", default=str(Path.cwd()))
 
         args = parser.parse_args(argv)
         if args.cmd == "init":
@@ -634,6 +810,151 @@ else:  # Fallback minimal CLI
                 print(f"[OK] Exported to {out_path}")
             else:
                 print(rendered)
+            return 0
+        elif args.cmd == "echo":
+            from difflib import SequenceMatcher
+            vault_path = Path(args.vault)
+            entries = vault_path / "entries"
+            dreams = vault_path / "dreams"
+            cfg = vault_path / "config.json"
+            if not (cfg.exists() and entries.exists()):
+                print("Vault not found: expected config.json and entries/ in --vault path", file=sys.stderr)
+                return 2
+
+            def _is_dream(d: dict) -> bool:
+                tags = [str(t).lower() for t in (d.get("tags") or [])]
+                if any(t in tags for t in ("dream", "dreams", "oneiric", "sleep", "vision")):
+                    return True
+                meta = d.get("metadata") or {}
+                if str(meta.get("origin", "")).lower() == "dream":
+                    return True
+                for k in ("category", "type", "state"):
+                    v = str(meta.get(k, "")).lower()
+                    if "dream" in v or "oneiric" in v:
+                        return True
+                return False
+
+            def get_type(d: dict) -> str:
+                if _is_dream(d):
+                    return "dream"
+                meta = d.get("metadata") or {}
+                t = str(meta.get("type", "") or d.get("type", "")).lower()
+                return t or "entry"
+
+            def get_date(d: dict) -> str:
+                return str(d.get("anchor_date") or d.get("created_at") or "")
+
+            def reson_score(d: dict) -> float:
+                score = 0.0
+                text = (str(d.get("title", "")) + "\n" + str(d.get("body", ""))).lower()
+                tags = [str(t).lower() for t in (d.get("tags") or [])]
+                meta = d.get("metadata") or {}
+                mood = str(meta.get("mood", "")).lower()
+                symbols = [str(x).lower() for x in (meta.get("symbols") or [])]
+                if args.phrase:
+                    p = args.phrase.lower()
+                    if p in text:
+                        score += 0.6
+                    elif args.fuzzy:
+                        ratio_t = SequenceMatcher(None, p, str(d.get("title", "")).lower()).ratio()
+                        ratio_b = SequenceMatcher(None, p, text[:2000]).ratio()
+                        score += 0.4 * max(ratio_t, ratio_b)
+                if args.tag:
+                    t = args.tag.lower()
+                    if t in tags or any(t in s for s in symbols) or (args.fuzzy and t in text):
+                        score += 0.3
+                    else:
+                        score -= 0.2
+                if args.tone:
+                    t = args.tone.lower()
+                    if t in mood or (args.fuzzy and t in text):
+                        score += 0.2
+                    else:
+                        score -= 0.1
+                if args.typ:
+                    score += 0.1 if get_type(d) == args.typ.lower() else -0.3
+                dt = get_date(d)
+                if dt:
+                    score += 0.01
+                return max(score, 0.0)
+
+            files = list(entries.glob("*.json"))
+            if dreams.exists():
+                files += list(dreams.glob("*.json"))
+            pairs: list[tuple[Path, dict]] = []
+            for p in files:
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if args.typ and get_type(data) != args.typ.lower():
+                    continue
+                if args.tag:
+                    t = args.tag.lower()
+                    tags_l = [str(ti).lower() for ti in (data.get("tags") or [])]
+                    meta = data.get("metadata") or {}
+                    symbols = [str(x).lower() for x in (meta.get("symbols") or [])]
+                    text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
+                    if not (t in tags_l or any(t in s for s in symbols) or (args.fuzzy and t in text)):
+                        continue
+                if args.tone:
+                    m = str((data.get("metadata") or {}).get("mood", "")).lower()
+                    text = (str(data.get("title", "")) + "\n" + str(data.get("body", ""))).lower()
+                    if not (args.tone.lower() in m or (args.fuzzy and args.tone.lower() in text)):
+                        continue
+                pairs.append((p, data))
+
+            if not pairs:
+                print("No echoes found.")
+                return 0
+
+            scored = [ (reson_score(d), p, d) for p, d in pairs ]
+            if args.sort_by.lower() == "date":
+                scored.sort(key=lambda x: get_date(x[2]), reverse=True)
+            else:
+                scored.sort(key=lambda x: x[0], reverse=True)
+            top = scored[: max(1, int(args.limit))]
+
+            def excerpt(text: str, length: int = 120) -> str:
+                t = " ".join(text.split())
+                return (t[: length - 1] + "…") if len(t) > length else t
+
+            lines = ["# Codex Echo Results (" + ("Resonance" if args.sort_by.lower()=="resonance" else "Date") + " Sort)"]
+            if args.phrase:
+                lines.append(f"Matched: \"{args.phrase}\" | Fuzzy: {'Enabled' if args.fuzzy else 'Disabled'}" + (f" | Tone: {args.tone}" if args.tone else ""))
+            elif args.tag or args.tone or args.typ:
+                meta = []
+                if args.tag: meta.append(f"Tag: {args.tag}")
+                if args.tone: meta.append(f"Tone: {args.tone}")
+                if args.typ: meta.append(f"Type: {args.typ}")
+                lines.append("Filters: " + ", ".join(meta))
+            lines.append("")
+
+            idx = 1
+            for score, path_i, data in top:
+                label_type = get_type(data).capitalize()
+                dt = get_date(data).split("T")[0]
+                title = str(data.get("title") or path_i.stem)
+                body = str(data.get("body") or "")
+                tags_l = data.get("tags") or []
+                mood = (data.get("metadata") or {}).get("mood")
+                res_pct = int(round(min(1.0, score) * 100))
+                lines.append(f"{idx}. {label_type}: {title}")
+                if dt:
+                    lines.append(f"   - Logged: {dt}")
+                if tags_l:
+                    lines.append(f"   - Tags: {', '.join(tags_l)}")
+                if mood:
+                    lines.append(f"   - Tone: {mood}")
+                if args.sort_by.lower() == "resonance":
+                    lines.append(f"   - Resonance: {res_pct}%")
+                if body:
+                    lines.append(f"   - Excerpt: \"{excerpt(body)}\"")
+                lines.append("")
+                idx += 1
+
+            lines.append("Use \"codex open <entry_id>\" to review.")
+            print("\n".join(lines))
             return 0
 
 
