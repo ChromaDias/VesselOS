@@ -4,3 +4,8 @@ memory/
 Echo-Community-Toolkit-Monorepo/
 VesselOSRepo/
 
+
+.venv/
+.codex/
+**/__pycache__/
+*.pyc
