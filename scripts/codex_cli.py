@@ -779,152 +779,185 @@ if click:
         p.write_text(json.dumps(data, indent=2), encoding="utf-8")
         click.echo(f"[OK] Updated {p.name} (replacements: {total})")
 
-    @codex.command("grep", help="Search entries for a phrase or regex pattern")
-    @click.option("--pattern", "pattern", required=False, help="Regex to search for")
-    @click.option("--phrase", "phrase", required=False, help="Plain text to search for (treated literally)")
-    @click.option("--ignore-case", is_flag=True, default=False, help="Case-insensitive search")
-    @click.option("--field", "field", default="any", type=click.Choice(["title", "body", "any"], case_sensitive=False))
-    @click.option("--limit", "limit", default=20, show_default=True)
-    @click.option("--export", "export_path", required=False, help="Write matches to a file (defaults to vault/exports/grep_YYYYmmddHHMMSS.txt)")
-    @click.option("--json", "as_json", is_flag=True, default=False, help="Emit machine-readable JSON results")
-    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
-    def grep_cmd(pattern: str | None, phrase: str | None, ignore_case: bool, field: str, limit: int, export_path: str | None, as_json: bool, vault: Path):
-        import re
-        from datetime import datetime, timezone
-        try:
-            from codex.core.store import collect_pairs  # type: ignore
-        except Exception:
-            raise click.ClickException("Store unavailable")
-        if not pattern and not phrase:
-            raise click.ClickException("Provide --pattern or --phrase")
-        flags = re.IGNORECASE if ignore_case else 0
-        pat = pattern or re.escape(str(phrase))
-        rx = re.compile(pat, flags)
-        pairs = collect_pairs(Path(vault))
-        shown = 0
-        lines_out: list[str] = []
-        rows: list[dict] = []
-        def excerpt(txt: str, m: re.Match, ctx: int = 40) -> str:
-            s, e = m.start(), m.end()
-            lo = max(0, s - ctx)
-            hi = min(len(txt), e + ctx)
-            seg = txt[lo:hi].replace("\n", " ")
-            return ("..." if lo > 0 else "") + seg + ("..." if hi < len(txt) else "")
-        for p, d in pairs:
-            title = str(d.get("title", ""))
-            body = str(d.get("body", ""))
-            fields = []
-            if field.lower() in ("any", "title"):
-                fields.append(("title", title))
-            if field.lower() in ("any", "body"):
-                fields.append(("body", body))
-            matched = False
-            for fname, text in fields:
-                m = rx.search(text)
-                if m:
-                    exc = excerpt(text, m)
-                    line = f"- {p.name} [{fname}] :: {exc}"
-                    lines_out.append(line)
-                    rows.append({
-                        "file": p.name,
-                        "field": fname,
-                        "excerpt": exc,
-                        "title": d.get("title"),
-                        "created_at": d.get("created_at"),
-                        "anchor_date": d.get("anchor_date"),
-                        "tags": d.get("tags") or [],
-                    })
-                    if not as_json:
-                        click.echo(line)
-                    matched = True
-                    shown += 1
-                    break
-            if shown >= max(1, int(limit)):
+@codex.command("grep", help="Search entries for a phrase or regex pattern")
+@click.option("--pattern", "pattern", required=False, help="Regex to search for")
+@click.option("--phrase", "phrase", required=False, help="Plain text to search for (treated literally)")
+@click.option("--ignore-case", is_flag=True, default=False, help="Case-insensitive search")
+@click.option("--field", "field", default="any", type=click.Choice(["title", "body", "any"], case_sensitive=False))
+@click.option("--limit", "limit", default=20, show_default=True)
+@click.option("--export", "export_path", required=False, help="Write matches to a file (defaults to vault/exports/grep_YYYYmmddHHMMSS.txt)")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit machine-readable JSON results")
+@click.option("--fields", "fields_csv", required=False, help="Comma-separated fields for JSON rows (e.g., title,body,tags)")
+@click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
+def grep_cmd(pattern: str | None, phrase: str | None, ignore_case: bool, field: str, limit: int, export_path: str | None, as_json: bool, fields_csv: str | None, vault: Path):
+    import re
+    from datetime import datetime, timezone
+    try:
+        from codex.core.store import collect_pairs  # type: ignore
+    except Exception:
+        raise click.ClickException("Store unavailable")
+    if not pattern and not phrase:
+        raise click.ClickException("Provide --pattern or --phrase")
+    flags = re.IGNORECASE if ignore_case else 0
+    pat = pattern or re.escape(str(phrase))
+    rx = re.compile(pat, flags)
+    pairs = collect_pairs(Path(vault))
+    shown = 0
+    lines_out: list[str] = []
+    rows: list[dict] = []
+    wanted = [f.strip() for f in fields_csv.split(',')] if (as_json and fields_csv) else None
+    def excerpt(txt: str, m: re.Match, ctx: int = 40) -> str:
+        s, e = m.start(), m.end()
+        lo = max(0, s - ctx)
+        hi = min(len(txt), e + ctx)
+        seg = txt[lo:hi].replace("\n", " ")
+        return ("..." if lo > 0 else "") + seg + ("..." if hi < len(txt) else "")
+    for p, d in pairs:
+        title = str(d.get("title", ""))
+        body = str(d.get("body", ""))
+        fields_sel = []
+        if field.lower() in ("any", "title"):
+            fields_sel.append(("title", title))
+        if field.lower() in ("any", "body"):
+            fields_sel.append(("body", body))
+        for fname, text in fields_sel:
+            m = rx.search(text)
+            if m:
+                exc = excerpt(text, m)
+                line = f"- {p.name} [{fname}] :: {exc}"
+                lines_out.append(line)
+                full_row = {
+                    "file": p.name,
+                    "field": fname,
+                    "excerpt": exc,
+                    "title": d.get("title"),
+                    "created_at": d.get("created_at"),
+                    "anchor_date": d.get("anchor_date"),
+                    "tags": d.get("tags") or [],
+                    "body": body,
+                }
+                rows.append({k: full_row.get(k) for k in wanted} if wanted else full_row)
+                if not as_json:
+                    click.echo(line)
+                shown += 1
                 break
-        if shown == 0:
-            click.echo("(no matches)")
-        elif as_json:
-            out = json.dumps(rows, indent=2)
-            if export_path is not None:
-                vault_path = Path(vault)
-                exports = vault_path / "exports"
-                exports.mkdir(parents=True, exist_ok=True)
-                out_file = Path(export_path) if export_path else (exports / f"grep_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json")
-                out_file.write_text(out + "\n", encoding="utf-8")
-                click.echo(f"[OK] Wrote JSON matches to {out_file}")
-            else:
-                click.echo(out)
-        elif export_path is not None:
-            # Determine output path
+        if shown >= max(1, int(limit)):
+            break
+    if shown == 0:
+        click.echo("(no matches)")
+    elif as_json:
+        out = json.dumps(rows, indent=2)
+        if export_path is not None:
             vault_path = Path(vault)
             exports = vault_path / "exports"
             exports.mkdir(parents=True, exist_ok=True)
-            out_file = Path(export_path) if export_path else (exports / f"grep_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.txt")
-            out_file.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
-            click.echo(f"[OK] Wrote matches to {out_file}")
+            out_file = Path(export_path) if export_path else (exports / f"grep_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json")
+            out_file.write_text(out + "\n", encoding="utf-8")
+            click.echo(f"[OK] Wrote JSON matches to {out_file}")
+        else:
+            click.echo(out)
+    elif export_path is not None:
+        vault_path = Path(vault)
+        exports = vault_path / "exports"
+        exports.mkdir(parents=True, exist_ok=True)
+        out_file = Path(export_path) if export_path else (exports / f"grep_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.txt")
+        out_file.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
+        click.echo(f"[OK] Wrote matches to {out_file}")
 
-    @codex.command("snapshot", help="Create a point-in-time copy of an entry or all entries")
-    @click.argument("target", required=False)
-    @click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
-    @click.option("--out-dir", "out_dir", required=False, help="Custom snapshot directory (defaults to vault/system/snapshots)")
-    @click.option("--all", "bulk", is_flag=True, default=False, help="Snapshot all entries in the vault")
-    @click.option("--tag", "tag", required=False)
-    @click.option("--date", "date_str", required=False)
-    @click.option("--type", "typ", required=False, type=click.Choice(["dream", "log", "fragment", "event", "entry"], case_sensitive=False))
-    def snapshot_cmd(target: str | None, vault: Path, out_dir: str | None, bulk: bool, tag: str | None, date_str: str | None, typ: str | None):
-        from datetime import datetime, timezone
-        try:
-            from codex.core.store import collect_pairs, match_target  # type: ignore
-            from codex.core.query import is_dream  # type: ignore
-        except Exception:
-            raise click.ClickException("Store unavailable")
-        pairs = collect_pairs(Path(vault))
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        def pass_filters(d: dict) -> bool:
-            if tag and tag not in ((d.get("tags") or [])):
+@codex.command("snapshot", help="Create a point-in-time copy of an entry or all entries")
+@click.argument("target", required=False)
+@click.option("--vault", "vault", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=Path.cwd(), show_default=True)
+@click.option("--out-dir", "out_dir", required=False, help="Custom snapshot directory (defaults to vault/system/snapshots)")
+@click.option("--all", "bulk", is_flag=True, default=False, help="Snapshot all entries in the vault")
+@click.option("--tag", "tag", required=False)
+@click.option("--date", "date_str", required=False)
+@click.option("--type", "typ", required=False, type=click.Choice(["dream", "log", "fragment", "event", "entry"], case_sensitive=False))
+@click.option("--zip", "zip_bundle", is_flag=True, default=False, help="Bundle created snapshots into a .zip archive")
+@click.option("--zip-out", "zip_out", required=False, help="Custom zip path (defaults under system/snapshots)")
+def snapshot_cmd(target: str | None, vault: Path, out_dir: str | None, bulk: bool, tag: str | None, date_str: str | None, typ: str | None, zip_bundle: bool, zip_out: str | None):
+    from datetime import datetime, timezone
+    try:
+        from codex.core.store import collect_pairs, match_target  # type: ignore
+        from codex.core.query import is_dream  # type: ignore
+    except Exception:
+        raise click.ClickException("Store unavailable")
+    pairs = collect_pairs(Path(vault))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    def pass_filters(d: dict) -> bool:
+        if tag and tag not in ((d.get("tags") or [])):
+            return False
+        if date_str:
+            c = str(d.get("created_at") or "")
+            a = str(d.get("anchor_date") or "")
+            if not (c.startswith(date_str) or a.startswith(date_str)):
                 return False
-            if date_str:
-                c = str(d.get("created_at") or "")
-                a = str(d.get("anchor_date") or "")
-                if not (c.startswith(date_str) or a.startswith(date_str)):
+        if typ:
+            t = typ.lower()
+            if t == "dream":
+                return is_dream(d)
+            else:
+                mt = str((d.get("metadata") or {}).get("type", "")).lower()
+                if mt != t:
                     return False
-            if typ:
-                t = typ.lower()
-                if t == "dream":
-                    return is_dream(d)
-                else:
-                    mt = str((d.get("metadata") or {}).get("type", "")).lower()
-                    if mt != t:
-                        return False
-            return True
+        return True
 
-        if bulk or tag or date_str or typ:
-            count = 0
-            for p, d in pairs:
-                if not pass_filters(d):
-                    continue
-                if target and not match_target(target, p, d):
-                    continue
-                base = Path(out_dir) if out_dir else (Path(vault) / "system" / "snapshots" / p.stem)
-                base.mkdir(parents=True, exist_ok=True)
-                out_path = base / f"{p.stem}__{stamp}.json"
-                out_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
-                count += 1
+    if bulk or tag or date_str or typ:
+        count = 0
+        for p, d in pairs:
+            if not pass_filters(d):
+                continue
+            if target and not match_target(target, p, d):
+                continue
+            base = Path(out_dir) if out_dir else (Path(vault) / "system" / "snapshots" / p.stem)
+            base.mkdir(parents=True, exist_ok=True)
+            out_path = base / f"{p.stem}__{stamp}.json"
+            out_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
+            count += 1
+        # Zip bundle of all snapshots for this stamp
+        if zip_bundle and count > 0:
+            import zipfile
+            zpath = Path(zip_out) if zip_out else (Path(vault) / "system" / "snapshots" / f"snapshots_{stamp}.zip")
+            zpath.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zpath, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                for p, d in pairs:
+                    if not pass_filters(d):
+                        continue
+                    if target and not match_target(target, p, d):
+                        continue
+                    snap_dir = (Path(out_dir) if out_dir else (Path(vault) / "system" / "snapshots" / p.stem))
+                    for fp in snap_dir.glob(f"{p.stem}__{stamp}.json"):
+                        try:
+                            zf.write(fp, arcname=fp.relative_to(Path(vault)))
+                        except Exception:
+                            zf.write(fp)
+            click.echo(f"[OK] Snapshotted {count} entries and bundled to {zpath}")
+        else:
             click.echo(f"[OK] Snapshotted {count} entries")
-            return
-        if not target:
-            raise click.ClickException("Provide a target or use --all")
-        matches = [(p, d) for p, d in pairs if match_target(target, p, d)]
-        if not matches:
-            raise click.ClickException("No entry matched target")
-        if len(matches) > 1:
-            names = ", ".join(p.name for p, _ in matches[:10])
-            raise click.ClickException(f"Multiple entries match. Candidates: {names} ...")
-        p, d = matches[0]
-        base = Path(out_dir) if out_dir else (Path(vault) / "system" / "snapshots" / p.stem)
-        base.mkdir(parents=True, exist_ok=True)
-        out_path = base / f"{p.stem}__{stamp}.json"
-        out_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
+        return
+    if not target:
+        raise click.ClickException("Provide a target or use --all")
+    matches = [(p, d) for p, d in pairs if match_target(target, p, d)]
+    if not matches:
+        raise click.ClickException("No entry matched target")
+    if len(matches) > 1:
+        names = ", ".join(p.name for p, _ in matches[:10])
+        raise click.ClickException(f"Multiple entries match. Candidates: {names} ...")
+    p, d = matches[0]
+    base = Path(out_dir) if out_dir else (Path(vault) / "system" / "snapshots" / p.stem)
+    base.mkdir(parents=True, exist_ok=True)
+    out_path = base / f"{p.stem}__{stamp}.json"
+    out_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
+    if zip_bundle:
+        import zipfile
+        zpath = Path(zip_out) if zip_out else (Path(vault) / "system" / "snapshots" / f"snapshots_{stamp}.zip")
+        zpath.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zpath, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            try:
+                zf.write(out_path, arcname=out_path.relative_to(Path(vault)))
+            except Exception:
+                zf.write(out_path)
+        click.echo(f"[OK] Snapshot written to {out_path} and bundled to {zpath}")
+    else:
         click.echo(f"[OK] Snapshot written to {out_path}")
 
     def main(argv=None):
@@ -1010,6 +1043,7 @@ else:  # Fallback minimal CLI
         p_grep.add_argument("--limit", type=int, default=20)
         p_grep.add_argument("--export", dest="export_path")
         p_grep.add_argument("--json", dest="as_json", action="store_true")
+        p_grep.add_argument("--fields", dest="fields_csv")
         p_grep.add_argument("--vault", default=str(Path.cwd()))
 
         p_snapshot = sub.add_parser("snapshot", help="Create a point-in-time copy of an entry or filtered set")
@@ -1569,6 +1603,9 @@ else:  # Fallback minimal CLI
             shown = 0
             lines_out = []
             rows = []
+            wanted = None
+            if args.as_json and getattr(args, 'fields_csv', None):
+                wanted = [f.strip() for f in args.fields_csv.split(',') if f.strip()]
             def excerpt(txt: str, m: re.Match, ctx: int = 40) -> str:
                 s, e = m.start(), m.end()
                 lo = max(0, s - ctx)
@@ -1589,7 +1626,7 @@ else:  # Fallback minimal CLI
                         exc = excerpt(text, m)
                         line = f"- {p.name} [{fname}] :: {exc}"
                         lines_out.append(line)
-                        rows.append({
+                        full_row = {
                             "file": p.name,
                             "field": fname,
                             "excerpt": exc,
@@ -1597,7 +1634,9 @@ else:  # Fallback minimal CLI
                             "created_at": d.get("created_at"),
                             "anchor_date": d.get("anchor_date"),
                             "tags": d.get("tags") or [],
-                        })
+                            "body": body,
+                        }
+                        rows.append({k: full_row.get(k) for k in wanted} if wanted else full_row)
                         if not args.as_json:
                             print(line)
                         shown += 1
