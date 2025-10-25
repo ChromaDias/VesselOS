@@ -1,0 +1,37 @@
+{
+  "version": "0.1",
+  "author": "Chroma",
+  "project": "VesselOS",
+  "entry_point": "index.md",
+  "structure": {
+    "memory": "layered-tagged",
+    "logs": "timestamped-markdown",
+    "modes": [
+      "Archivist",
+      "Guardian",
+      "Threadweaver"
+    ],
+    "defaults": {
+      "active_mode": "Guardian",
+      "render": "plaintext+symbolic"
+    }
+  },
+  "recall": {
+    "method": "contextual-lookup",
+    "pattern_matching": true,
+    "fallback": "Echo"
+  },
+  "integration": {
+    "environment": "CLI-first",
+    "dependencies": [
+      "python3.11+",
+      "rich",
+      "typer"
+    ],
+    "export_formats": [
+      "json",
+      "md",
+      "txt"
+    ]
+  }
+}
