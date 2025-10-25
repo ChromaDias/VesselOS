@@ -8,6 +8,25 @@ const fs = require("fs");
 const path = require("path");
 const { respond } = require("./core/index.js");
 
+function loadDefaultsFromConfig() {
+  try {
+    const cfgPath = path.resolve(__dirname, "codex", "config.json");
+    if (!fs.existsSync(cfgPath)) return {};
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    const def = (cfg && cfg.structure && cfg.structure.defaults) || {};
+    const result = {
+      project: cfg.project,
+      version: cfg.version,
+      mode: def.active_mode,
+      render: def.render,
+    };
+    // drop undefined entries
+    return Object.fromEntries(Object.entries(result).filter(([, v]) => v !== undefined));
+  } catch {
+    return {};
+  }
+}
+
 function parseArgs(argv) {
   const out = { message: null, context: {} };
   const rest = [];
@@ -45,7 +64,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  console.log(`VesselOS CLI\n\nUsage:\n  node cli.js "message" [-c '{"k":"v"}'] [-f context.json]\n  echo "message" | node cli.js [-c '{"k":"v"}']\n`);
+  console.log(`VesselOS CLI\n\nUsage:\n  node cli.js "message" [-c '{"k":"v"}'] [-f context.json]\n  echo "message" | node cli.js [-c '{"k":"v"}']\n\nNotes:\n  - Defaults are merged from codex/config.json (mode/render/project/version).\n  - Values from -c/--context or --context-file override config defaults.`);
 }
 
 async function main() {
@@ -54,7 +73,9 @@ async function main() {
 
   const run = (msg) => {
     if (!msg) { usage(); process.exit(1); }
-    const out = respond(msg, args.context || {});
+    const defaults = loadDefaultsFromConfig();
+    const merged = { ...(defaults || {}), ...(args.context || {}) };
+    const out = respond(msg, merged);
     console.log(out);
   };
 
@@ -75,4 +96,3 @@ async function main() {
 }
 
 main();
-
