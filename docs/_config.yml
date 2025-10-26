@@ -1,4 +1,5 @@
 title: VesselOS Architecture
 description: Codex CLI, Export/Snapshot, and Core Layers
 theme: jekyll-theme-cayman
-
+baseurl: "/VesselOS"
+url: "https://chromadias.github.io"

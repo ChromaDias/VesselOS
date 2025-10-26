@@ -25,6 +25,23 @@ title: VesselOS – Landing
 - Structured exports (md/txt/json/yaml/html) + release bundles via CI
 - Snapshots with tag/date/type filters and optional ZIP packaging
 
+## Architecture Preview
+
+```
+User / Chroma ─▶ CLI (codex) ─▶ Command Engine ─▶ Core (store/query/render)
+                                    │                   │
+                                    │                   ├─ Indexer (system/index.json)
+                                    │                   ├─ Export (md/txt/json/yaml/html)
+                                    │                   └─ Snapshot (system/snapshots/*)
+                                    │
+                                    └─ Wizards (export wizard)
+
+Vault
+  • entries/ • dreams/ • exports/ • system/index.json • system/snapshots/
+```
+
+See the full map on the [Architecture]({{ site.baseurl }}/architecture.html) page.
+
 ## Quick Start
 
 ```bash
