@@ -1,77 +1,49 @@
 ---
 layout: default
-title: VesselOS – Architecture Map
+title: VesselOS – Landing
 ---
 
 {% include nav.html %}
 
-# VesselOS – Codex Architecture
+<div style="display:flex;flex-direction:column;gap:1rem;margin-top:1rem">
+  <h1 style="margin:0">VesselOS</h1>
+  <p style="font-size:1.15rem;max-width:60ch">
+    Modular Codex architecture for memory, resonance search, and symbolic export. A CLI-first toolkit for dream logs, narrative fragments, and living knowledge bases.
+  </p>
+  <div style="display:flex;gap:.75rem;flex-wrap:wrap">
+    <a class="btn" href="{{ site.baseurl }}/cli.html" style="padding:.6rem 1rem;background:#0366d6;color:#fff;border-radius:.4rem;text-decoration:none">Get Started</a>
+    <a class="btn" href="{{ site.baseurl }}/architecture.html" style="padding:.6rem 1rem;border:1px solid #0366d6;color:#0366d6;border-radius:.4rem;text-decoration:none">Architecture</a>
+    <a class="btn" href="https://github.com/ChromaDias/VesselOS/releases/latest" style="padding:.6rem 1rem;border:1px solid #555;color:#555;border-radius:.4rem;text-decoration:none">Download</a>
+    <a class="btn" href="https://github.com/ChromaDias/VesselOS" style="padding:.6rem 1rem;border:1px solid #555;color:#555;border-radius:.4rem;text-decoration:none">GitHub</a>
+  </div>
+</div>
 
-This page maps the core layers and data flows of VesselOS (Codex CLI + core).
+## Highlights
 
-## High-Level Map
+- CLI-first commands: `init`, `add`, `list`, `summon`, `echo`, `grep`, `update`, `export`, `snapshot`
+- Dream-aware retrieval with symbolic filters and resonance search
+- Structured exports (md/txt/json/yaml/html) + release bundles via CI
+- Snapshots with tag/date/type filters and optional ZIP packaging
 
-```
-User / Chroma ─▶ CLI (codex) ─▶ Command Engine ─▶ Core (store/query/render)
-                                    │                   │
-                                    │                   ├─ Indexer (system/index.json)
-                                    │                   ├─ Export (md/txt/json/yaml/html)
-                                    │                   └─ Snapshot (system/snapshots/*)
-                                    │
-                                    └─ Wizards (export wizard)
+## Quick Start
 
-Filesystem (vault)
-  • entries/      JSON entries (logs, fragments)
-  • dreams/       Dream-origin entries
-  • exports/      Rendered artifacts (md/txt/json/yaml, etc.)
-  • system/
-      ├─ index.json  (lightweight index)
-      └─ snapshots/  (timestamped copies)
-```
+```bash
+# 1) Clone
+git clone https://github.com/ChromaDias/VesselOS.git
+cd VesselOS
 
-## CLI Surfaces
+# 2) Initialize a vault
+./scripts/codex init --name vessel_relics --base VesselOS/codex
 
-```
-codex init     – scaffold vault
-codex add      – create entry (optionally dream)
-codex list     – list by tag/date/type
-codex summon   – retrieve (key/filters; md/txt/json/yaml)
-codex echo     – resonance search (phrase/tag/tone; fuzzy)
-codex grep     – regex/phrase search; --json --fields
-codex update   – surgical regex replacement
-codex export   – bundles + single-entry exports
-codex snapshot – snapshots; --all/--tag/--date/--type; --zip
-```
+# 3) Add an entry
+./scripts/codex add --title "First Entry" --body "Hello Vessel." --tags "log" --date 2025-10-25 --vault VesselOS/codex/vessel_relics
 
-## Component Diagram (Mermaid)
-
-```mermaid
-flowchart LR
-  A[User / Chroma] --> B[Codex CLI]
-  B --> C[Command Engine]
-  C --> D[Core Store/Query]
-  C --> E[Render/Export]
-  C --> F[Indexer]
-  C --> G[Snapshot]
-
-  subgraph Vault
-    H[entries/]:::dir
-    I[dreams/]:::dir
-    J[exports/]:::dir
-    K[system/index.json]
-    L[system/snapshots/]:::dir
-  end
-
-  D <--> H
-  D <--> I
-  E --> J
-  F <--> K
-  G --> L
-
-  classDef dir fill:#eef,stroke:#99f,stroke-width:1px;
+# 4) Explore
+./scripts/codex list --vault VesselOS/codex/vessel_relics
+./scripts/codex grep --phrase Vessel --vault VesselOS/codex/vessel_relics
 ```
 
-## Notes
+## Learn More
 
-- Exports on release tags are bundled by CI (see dist/codex_tools.zip).
-- Mermaid rendering may depend on browser support; ASCII blocks above are canonical.
+- Read the full CLI guide: [CLI Reference]({{ site.baseurl }}/cli.html)
+- Explore design: [Architecture]({{ site.baseurl }}/architecture.html)
