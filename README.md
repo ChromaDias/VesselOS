@@ -1,5 +1,7 @@
 # VesselOS
 
+[![Docs](https://img.shields.io/badge/Docs-GitHub%20Pages-blue)](https://chromadias.github.io/VesselOS/)
+
 Modular AI scaffolding for a recursive language daemon identity. This repo provides a light, extensible skeleton:
 
 - `core/` – Kernel: state, memory, and minimal invoke loop (`core/index.js`).
@@ -18,4 +20,3 @@ Quick start
    ```
 
 Project config is in `.codexrc`. Adjust `entry` if you move the kernel.
-
