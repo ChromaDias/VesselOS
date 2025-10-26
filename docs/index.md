@@ -3,6 +3,8 @@ layout: default
 title: VesselOS – Architecture Map
 ---
 
+{% include nav.html %}
+
 # VesselOS – Codex Architecture
 
 This page maps the core layers and data flows of VesselOS (Codex CLI + core).
@@ -73,4 +75,3 @@ flowchart LR
 
 - Exports on release tags are bundled by CI (see dist/codex_tools.zip).
 - Mermaid rendering may depend on browser support; ASCII blocks above are canonical.
-
